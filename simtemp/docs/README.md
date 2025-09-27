@@ -2,7 +2,7 @@
 
 ## Repo structure
 - kernel/      → Kernel module
-- user/cli/    → CLI Python
+- user/cli/    → CLI C++
 - user/gui/    → Optional GUI
 - scripts/     → Build & demo scripts
 - docs/        → Documentation
