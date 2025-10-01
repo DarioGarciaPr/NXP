@@ -4,103 +4,137 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
-#include <linux/mutex.h>
 #include <linux/timer.h>
-#include <linux/jiffies.h>
-#include <linux/slab.h>
-#include <linux/types.h>
+#include <linux/workqueue.h>
+#include <linux/poll.h>
+#include <linux/spinlock.h>
 
-#define BUF_SIZE 128
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Darío García");
+MODULE_DESCRIPTION("MVP nxp_simtemp safe version");
 
 struct simtemp_sample {
-    __u64 timestamp_ns;
-    __s32 temp_mC;
-    __u32 flags;
+    u64 timestamp_ns;
+    s32 temp_mC;
+    u32 flags;
 } __attribute__((packed));
 
-struct simtemp_dev {
-    struct simtemp_sample buffer[BUF_SIZE];
-    int head;
-    int tail;
-    struct mutex lock;
-    struct miscdevice miscdev;
-    struct timer_list timer;
-};
+#define FLAG_NEW_SAMPLE       0x1
+#define FLAG_THRESHOLD_CROSS  0x2
 
-static struct simtemp_dev *simdev;
+static struct simtemp_sample latest_sample;
+static struct timer_list simtemp_timer;
+static wait_queue_head_t simtemp_wq;
+static spinlock_t sample_lock;
+static struct miscdevice simtemp_misc;
 
-static void simtemp_timer_cb(struct timer_list *t) {
-    struct simtemp_dev *dev = from_timer(dev, t, timer);
-    struct simtemp_sample sample;
+static unsigned int sampling_ms = 100;
+static int threshold_mC = 45000;
 
-    sample.timestamp_ns = ktime_get_ns();
-    sample.temp_mC = 42000; // ejemplo fijo
-    sample.flags = 1; // NEW_SAMPLE
+static void timer_callback(struct timer_list *t)
+{
+    unsigned long flags;
+    u32 alert = 0;
 
-    mutex_lock(&dev->lock);
-    dev->buffer[dev->head] = sample;
-    dev->head = (dev->head + 1) % BUF_SIZE;
-    if(dev->head == dev->tail)
-        dev->tail = (dev->tail + 1) % BUF_SIZE; // descarta el más viejo
-    mutex_unlock(&dev->lock);
+    latest_sample.timestamp_ns = ktime_get_ns();
+    latest_sample.temp_mC = 40000 + (prandom_u32() % 10000); // 40-50°C
 
-    mod_timer(&dev->timer, jiffies + msecs_to_jiffies(100)); // 100ms
+    if (latest_sample.temp_mC >= threshold_mC)
+        alert = FLAG_THRESHOLD_CROSS;
+
+    spin_lock_irqsave(&sample_lock, flags);
+    latest_sample.flags = FLAG_NEW_SAMPLE | alert;
+    spin_unlock_irqrestore(&sample_lock, flags);
+
+    wake_up_interruptible(&simtemp_wq);
+
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
 }
 
-static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
-    struct simtemp_sample sample;
-    ssize_t ret = 0;
+static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+    struct simtemp_sample sample_copy;
+    int ret;
 
-    mutex_lock(&simdev->lock);
-    if(simdev->head == simdev->tail) {
-        ret = 0; // buffer vacío
-        goto out;
+    if (count < sizeof(sample_copy))
+        return -EINVAL;
+
+    if (file->f_flags & O_NONBLOCK) {
+        // copiar último sample
+        spin_lock(&sample_lock);
+        sample_copy = latest_sample;
+        spin_unlock(&sample_lock);
+    } else {
+        // espera un sample
+        ret = wait_event_interruptible(simtemp_wq, latest_sample.flags & FLAG_NEW_SAMPLE);
+        if (ret)
+            return ret;
+        spin_lock(&sample_lock);
+        sample_copy = latest_sample;
+        spin_unlock(&sample_lock);
     }
-    sample = simdev->buffer[simdev->tail];
-    simdev->tail = (simdev->tail + 1) % BUF_SIZE;
-out:
-    mutex_unlock(&simdev->lock);
 
-    if(ret == 0 && copy_to_user(buf, &sample, sizeof(sample)))
+    // limpiar NEW_SAMPLE
+    spin_lock(&sample_lock);
+    latest_sample.flags &= ~FLAG_NEW_SAMPLE;
+    spin_unlock(&sample_lock);
+
+    if (copy_to_user(buf, &sample_copy, sizeof(sample_copy)))
         return -EFAULT;
 
-    return sizeof(sample);
+    return sizeof(sample_copy);
+}
+
+static unsigned int simtemp_poll(struct file *file, poll_table *wait)
+{
+    unsigned int mask = 0;
+
+    poll_wait(file, &simtemp_wq, wait);
+
+    if (latest_sample.flags & FLAG_NEW_SAMPLE)
+        mask |= POLLIN | POLLRDNORM;
+    if (latest_sample.flags & FLAG_THRESHOLD_CROSS)
+        mask |= POLLPRI;
+
+    return mask;
 }
 
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
-    .read  = simtemp_read,
+    .read = simtemp_read,
+    .poll = simtemp_poll,
 };
 
-static int __init nxp_simtemp_init(void) {
-    simdev = kzalloc(sizeof(*simdev), GFP_KERNEL);
-    if(!simdev)
-        return -ENOMEM;
+static int __init simtemp_init(void)
+{
+    int ret;
 
-    mutex_init(&simdev->lock);
+    spin_lock_init(&sample_lock);
+    init_waitqueue_head(&simtemp_wq);
 
-    simdev->miscdev.minor = MISC_DYNAMIC_MINOR;
-    simdev->miscdev.name = "simtemp";
-    simdev->miscdev.fops = &simtemp_fops;
-    misc_register(&simdev->miscdev);
+    ret = misc_register(&simtemp_misc);
+    if (ret)
+        return ret;
 
-    timer_setup(&simdev->timer, simtemp_timer_cb, 0);
-    mod_timer(&simdev->timer, jiffies + msecs_to_jiffies(100));
+    timer_setup(&simtemp_timer, timer_callback, 0);
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
 
-    printk(KERN_INFO "nxp_simtemp: module loaded\n");
+    pr_info("nxp_simtemp loaded\n");
     return 0;
 }
 
-static void __exit nxp_simtemp_exit(void) {
-    del_timer_sync(&simdev->timer);
-    misc_deregister(&simdev->miscdev);
-    kfree(simdev);
-    printk(KERN_INFO "nxp_simtemp: module unloaded\n");
+static void __exit simtemp_exit(void)
+{
+    del_timer_sync(&simtemp_timer);
+    misc_deregister(&simtemp_misc);
+    pr_info("nxp_simtemp unloaded\n");
 }
 
-module_init(nxp_simtemp_init);
-module_exit(nxp_simtemp_exit);
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Darío García");
-MODULE_DESCRIPTION("NXP Simulated Temperature Sensor with miscdevice skeleton and ring buffer");
+static struct miscdevice simtemp_misc = {
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = "simtemp",
+    .fops = &simtemp_fops,
+};
 
+module_init(simtemp_init);
+module_exit(simtemp_exit);
