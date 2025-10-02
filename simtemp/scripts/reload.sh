@@ -2,7 +2,9 @@
 # reload.sh - recarga el módulo nxp_simtemp y muestra logs
 
 MODULE_NAME="nxp_simtemp"
-MODULE_PATH="../kernel/${MODULE_NAME}.ko"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+KERNEL_DIR="$SCRIPT_DIR/../kernel"
+MODULE_PATH="$KERNEL_DIR/${MODULE_NAME}.ko"
 KDIR="/lib/modules/$(uname -r)/build"
 
 echo "============================="
@@ -27,7 +29,8 @@ fi
 
 # 3. Compilar módulo
 echo "Compilando módulo..."
-make -C $KDIR M=$(pwd)/../kernel modules || { echo "Error de compilación"; exit 1; }
+make -C $KDIR M=$KERNEL_DIR modules || { echo "Error de compilación"; exit 1; }
+
 
 # 4. Insertar módulo
 echo "Insertando módulo..."
