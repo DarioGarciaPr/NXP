@@ -1,14 +1,15 @@
-#ifndef _NXP_SIMTEMP_H
-#define _NXP_SIMTEMP_H
+// nxp_simtemp_ioctl.h
+#ifndef NXP_SIMTEMP_IOCTL_H
+#define NXP_SIMTEMP_IOCTL_H
 
-#include <linux/types.h>
+#include <linux/ioctl.h>
 
-// Estructura compartida kernel <-> user
-struct simtemp_sample {
-    __u64 timestamp_ns;  // tiempo de muestra
-    __s32 temp_mC;       // temperatura en milicelsius
-    __u32 flags;         // bit0 = NEW_SAMPLE, bit1 = THRESHOLD_CROSSED
-};
+// Caracter único para nuestro dispositivo
+#define SIMTEMP_MAGIC 't'
 
-#endif /* _NXP_SIMTEMP_H */
+// IOCTLs
+#define SIMTEMP_SET_THRESHOLD _IOW(SIMTEMP_MAGIC, 1, int)   // Configura el threshold en m°C
+#define SIMTEMP_SET_SAMPLING  _IOW(SIMTEMP_MAGIC, 2, int)   // Configura el sampling en ms
+
+#endif // NXP_SIMTEMP_IOCTL_H
 

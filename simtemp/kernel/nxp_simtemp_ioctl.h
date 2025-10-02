@@ -1,0 +1,12 @@
+#ifndef NXP_SIMTEMP_IOCTL_H
+#define NXP_SIMTEMP_IOCTL_H
+
+#include <linux/ioctl.h>
+
+#define NXPSIM_IOC_MAGIC 'k'
+
+#define NXPSIM_IOCTL_SET_THRESHOLD    _IOW(NXPSIM_IOC_MAGIC, 1, int)
+#define NXPSIM_IOCTL_SET_SAMPLING_MS  _IOW(NXPSIM_IOC_MAGIC, 2, int)
+
+#endif // NXP_SIMTEMP_IOCTL_H
+

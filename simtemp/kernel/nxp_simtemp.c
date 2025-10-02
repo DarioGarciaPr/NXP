@@ -1,229 +1,151 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/miscdevice.h>
 #include <linux/fs.h>
+#include <linux/miscdevice.h>
 #include <linux/uaccess.h>
-#include <linux/random.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
-#include <linux/mutex.h>
-#include <linux/slab.h>
-#include <linux/ktime.h>
+#include <linux/random.h>
 
-#include "nxp_simtemp.h"
+#include "nxp_simtemp_ioctl.h"  // Define tus IOCTLs: NXPSIM_IOCTL_SET_THRESHOLD, NXPSIM_IOCTL_SET_SAMPLING_MS
 
-// ======================
-// Variables globales
-// ======================
-static struct simtemp_sample latest_sample;
-static unsigned int sampling_ms = 100;   // periodo default 100 ms
-static int32_t threshold_mC = 45000;     // umbral default = 45°C
-static char mode[16] = "normal";
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Darío García");
+MODULE_DESCRIPTION("Simulador de sensor de temperatura NXP");
+
+// Estructura para los datos de la muestra
+struct temp_sample {
+    int temp_mC;   // Temperatura en milicelsius
+    int flags;
+};
+
+// Variables globales del módulo
+static struct temp_sample latest_sample;
+static int simtemp_threshold = 45000;      // Umbral por defecto 45°C
+static int simtemp_sampling_ms = 500;      // Intervalo de muestreo por defecto (ms)
 
 static struct timer_list simtemp_timer;
 static struct workqueue_struct *simtemp_wq;
 static struct work_struct simtemp_work;
 
-static struct mutex simtemp_lock;
-
-static struct kobject *simtemp_kobj;
-
-// ======================
-// Funciones auxiliares
-// ======================
-
-static void generate_sample(void)
+// Función para generar una muestra aleatoria
+static void simtemp_generate_sample(struct work_struct *work)
 {
-    mutex_lock(&simtemp_lock);
+    latest_sample.temp_mC = 40000 + (get_random_u32() % 10000); // 40°C a 50°C
+    latest_sample.flags = (latest_sample.temp_mC >= simtemp_threshold) ? 1 : 0;
 
-    latest_sample.timestamp_ns = ktime_get_ns();
-    latest_sample.temp_mC = 40000 + (get_random_u32() % 10000); // 40–50°C
-    latest_sample.flags = 0x1; // siempre NEW_SAMPLE
-
-    if (latest_sample.temp_mC >= threshold_mC)
-        latest_sample.flags |= 0x2; // THRESHOLD_CROSSED
-
-    mutex_unlock(&simtemp_lock);
+    // Reprogramar timer
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(simtemp_sampling_ms));
 }
 
-static void work_handler(struct work_struct *work)
-{
-    generate_sample();
-    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
-}
-
-static void timer_callback(struct timer_list *t)
+// Timer callback
+static void simtemp_timer_cb(struct timer_list *t)
 {
     queue_work(simtemp_wq, &simtemp_work);
 }
 
-// ======================
-// Operaciones de archivo
-// ======================
-
-static ssize_t simtemp_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+// Función read
+static ssize_t simtemp_read(struct file *file, char __user *buf,
+                             size_t count, loff_t *ppos)
 {
-    if (len < sizeof(latest_sample))
-        return -EINVAL;
+    char tmp[128];
+    int len;
 
-    mutex_lock(&simtemp_lock);
-    if (copy_to_user(buf, &latest_sample, sizeof(latest_sample))) {
-        mutex_unlock(&simtemp_lock);
-        return -EFAULT;
+    // latest_sample.temp_mC está en miligrados (int)
+    int temp_int = latest_sample.temp_mC / 1000;       // parte entera
+    int temp_frac = latest_sample.temp_mC % 1000;      // parte decimal
+
+    len = snprintf(tmp, sizeof(tmp), "Temp: %d.%03d °C | flags=0x%x\n",
+                   temp_int, temp_frac,
+                   latest_sample.flags);
+
+    if (*ppos >= len) {
+        *ppos = 0; // reset offset
     }
-    mutex_unlock(&simtemp_lock);
 
-    return sizeof(latest_sample);
+    if (count > len) count = len;
+
+    if (copy_to_user(buf, tmp, count))
+        return -EFAULT;
+
+    *ppos += count;
+    return count;
+}
+// Función ioctl
+static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    int value;
+
+    switch (cmd) {
+        case NXPSIM_IOCTL_SET_THRESHOLD:
+            if (copy_from_user(&value, (int __user *)arg, sizeof(int)))
+                return -EFAULT;
+            simtemp_threshold = value;
+            pr_info("Threshold seteado a %d\n", simtemp_threshold);
+            break;
+
+        case NXPSIM_IOCTL_SET_SAMPLING_MS:
+            if (copy_from_user(&value, (int __user *)arg, sizeof(int)))
+                return -EFAULT;
+            simtemp_sampling_ms = value;
+            pr_info("Sampling seteado a %d ms\n", simtemp_sampling_ms);
+            break;
+
+        default:
+            return -EINVAL;
+    }
+    return 0;
 }
 
+// File operations
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
-    .read  = simtemp_read,
+    .read = simtemp_read,
+    .unlocked_ioctl = simtemp_ioctl,
+    .llseek = noop_llseek,
 };
 
-// ======================
-// Sysfs: atributos
-// ======================
-
-static ssize_t sampling_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-    return sprintf(buf, "%u\n", sampling_ms);
-}
-
-static ssize_t sampling_store(struct kobject *kobj, struct kobj_attribute *attr,
-                              const char *buf, size_t count)
-{
-    unsigned int val;
-    if (kstrtouint(buf, 10, &val))
-        return -EINVAL;
-
-    mutex_lock(&simtemp_lock);
-    sampling_ms = val;
-    mutex_unlock(&simtemp_lock);
-    return count;
-}
-
-static ssize_t threshold_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-    return sprintf(buf, "%d\n", threshold_mC);
-}
-
-static ssize_t threshold_store(struct kobject *kobj, struct kobj_attribute *attr,
-                               const char *buf, size_t count)
-{
-    int val;
-    if (kstrtoint(buf, 10, &val))
-        return -EINVAL;
-
-    mutex_lock(&simtemp_lock);
-    threshold_mC = val;
-    mutex_unlock(&simtemp_lock);
-    return count;
-}
-
-static ssize_t mode_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-    return sprintf(buf, "%s\n", mode);
-}
-
-static ssize_t mode_store(struct kobject *kobj, struct kobj_attribute *attr,
-                          const char *buf, size_t count)
-{
-    mutex_lock(&simtemp_lock);
-    strncpy(mode, buf, sizeof(mode));
-    mode[sizeof(mode)-1] = '\0';
-    mutex_unlock(&simtemp_lock);
-    return count;
-}
-
-static struct kobj_attribute sampling_attr = __ATTR(sampling_ms, 0664, sampling_show, sampling_store);
-static struct kobj_attribute threshold_attr = __ATTR(threshold_mC, 0664, threshold_show, threshold_store);
-static struct kobj_attribute mode_attr = __ATTR(mode, 0664, mode_show, mode_store);
-
-static struct attribute *simtemp_attrs[] = {
-    &sampling_attr.attr,
-    &threshold_attr.attr,
-    &mode_attr.attr,
-    NULL,
-};
-
-static struct attribute_group simtemp_group = {
-    .attrs = simtemp_attrs,
-};
-
-// ======================
-// Dispositivo misc
-// ======================
-
+// Misc device
 static struct miscdevice simtemp_dev = {
     .minor = MISC_DYNAMIC_MINOR,
     .name  = "nxp_simtemp",
     .fops  = &simtemp_fops,
 };
 
-// ======================
-// Init y Exit
-// ======================
-
+// Init del módulo
 static int __init simtemp_init(void)
 {
     int ret;
 
-    mutex_init(&simtemp_lock);
+    simtemp_wq = create_singlethread_workqueue("simtemp_wq");
+    if (!simtemp_wq)
+        return -ENOMEM;
+
+    INIT_WORK(&simtemp_work, simtemp_generate_sample);
+    timer_setup(&simtemp_timer, simtemp_timer_cb, 0);
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(simtemp_sampling_ms));
 
     ret = misc_register(&simtemp_dev);
-    if (ret)
+    if (ret) {
+        destroy_workqueue(simtemp_wq);
         return ret;
-
-    simtemp_kobj = kobject_create_and_add("simtemp", kernel_kobj);
-    if (!simtemp_kobj)
-        return -ENOMEM;
-
-    if (sysfs_create_group(simtemp_kobj, &simtemp_group)) {
-        kobject_put(simtemp_kobj);
-        misc_deregister(&simtemp_dev);
-        return -EINVAL;
     }
 
-    simtemp_wq = create_singlethread_workqueue("simtemp_wq");
-    if (!simtemp_wq) {
-        sysfs_remove_group(simtemp_kobj, &simtemp_group);
-        kobject_put(simtemp_kobj);
-        misc_deregister(&simtemp_dev);
-        return -ENOMEM;
-    }
-
-    INIT_WORK(&simtemp_work, work_handler);
-    timer_setup(&simtemp_timer, timer_callback, 0);
-    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
-
-    pr_info("nxp_simtemp: module loaded\n");
+    pr_info("nxp_simtemp driver loaded\n");
     return 0;
 }
 
+// Exit del módulo
 static void __exit simtemp_exit(void)
 {
     del_timer_sync(&simtemp_timer);
-    flush_workqueue(simtemp_wq);
+    cancel_work_sync(&simtemp_work);
     destroy_workqueue(simtemp_wq);
-
-    if (simtemp_kobj) {
-        sysfs_remove_group(simtemp_kobj, &simtemp_group);
-        kobject_put(simtemp_kobj);
-    }
-
     misc_deregister(&simtemp_dev);
-
-    pr_info("nxp_simtemp: module unloaded\n");
+    pr_info("nxp_simtemp driver unloaded\n");
 }
 
 module_init(simtemp_init);
 module_exit(simtemp_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Tu Nombre");
-MODULE_DESCRIPTION("NXP Simulated Temperature Sensor Driver");
 
