@@ -10,6 +10,7 @@ a temperature sensor device with the following features:
   - `/dev/simtemp` (character device for reading samples).
   - `/sys/class/misc/simtemp/` (sysfs controls: sampling interval, threshold, stats).
   - `ioctl` commands defined in `nxp_simtemp_ioctl.h`.
+- Device Tree (DTS) node placeholder (nxp-simtemp.dtsi) for future integration.
 - Alert generation when temperature exceeds a configurable threshold.
 - Self-test mode via the user CLI (`--test`).
 
@@ -32,9 +33,22 @@ graph TD
     CLI --> Sysfs
     DevNode --> Kernel
     Sysfs --> Kernel
-    Kernel --> Timer
+    Kernel --> Timer 
 ```
+```mermaid
+flowchart LR
+    subgraph User_Space
+        A[User CLI (C++)] -->|read/ioctl/poll| B[/dev/simtemp]
+        C[Sysfs] -->|read/write| D[NXP SimTemp Kernel Module]
+    end
 
+    subgraph Kernel_Space
+        D --> E[Timer + Workqueue]
+        D --> F[DTS Node: /soc/nxp_simtemp] 
+    end
+
+    B --> D
+```
 ---
 
 ## 3. Kernel Module Design
