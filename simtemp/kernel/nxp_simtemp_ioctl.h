@@ -1,28 +1,23 @@
 #ifndef _NXP_SIMTEMP_IOCTL_H_
 #define _NXP_SIMTEMP_IOCTL_H_
 
-#include <linux/ioctl.h>
+#include <linux/types.h>
 
-/*
- * IOCTL definitions for the NXP simulated temperature sensor
- *
- * User space applications can control the driver using these commands:
- *
- * - NXPSIM_IOCTL_SET_THRESHOLD:
- *      Set the threshold in milliCelsius.
- *
- * - NXPSIM_IOCTL_SET_SAMPLING_MS:
- *      Set the sampling interval in milliseconds.
- */
+struct simtemp_sample {
+    __u64 timestamp_ns;   // monotonic timestamp
+    __s32 temp_mC;        // milli-degree Celsius
+    __u32 flags;          // bit0=NEW_SAMPLE, bit1=THRESHOLD_CROSSED
+} __attribute__((packed));
 
-#define NXPSIM_IOCTL_MAGIC 'T'
+/* Opcional: IOCTL codes */
+#define SIMTEMP_IOC_MAGIC  's'
+#define SIMTEMP_IOC_RESET_STATS   _IO(SIMTEMP_IOC_MAGIC, 0)
+#define SIMTEMP_IOC_GET_STATS     _IOR(SIMTEMP_IOC_MAGIC, 1, struct simtemp_stats)
 
-/* Set temperature threshold (in milliCelsius) */
-#define NXPSIM_IOCTL_SET_THRESHOLD   _IOW(NXPSIM_IOCTL_MAGIC, 1, int)
+struct simtemp_stats {
+    __u64 updates;
+    __u64 alerts;
+    __u64 errors;
+};
 
-/* Set sampling interval (in milliseconds) */
-#define NXPSIM_IOCTL_SET_SAMPLING_MS _IOW(NXPSIM_IOCTL_MAGIC, 2, int)
-
-#endif /* _NXP_SIMTEMP_IOCTL_H_ */
-
-
+#endif

@@ -1,34 +1,30 @@
-# Test Plan - simtemp
+# Test Plan for nxp_simtemp
 
-## Objective
-Verify the functionality of the `nxp_simtemp` kernel module and the CLI interface (`user/cli/main.cpp`).
+## T1 — Load/Unload
+- Build with `scripts/build.sh`
+- Run `sudo insmod nxp_simtemp.ko`
+- Check `/dev/simtemp` and `/sys/class/misc/simtemp/`
+- Run `sudo rmmod nxp_simtemp.ko`
+- Expect no warnings in `dmesg`
 
-## Test Environment
-- Kernel: 6.14.0-33-generic (x86_64)  
-- OS: Ubuntu 24.04  
-- Module: `nxp_simtemp.ko`  
-- CLI: Compiled from `main.cpp` → executable `main`  
-- Scripts: `build.sh`, `run_demo.sh`  
+## T2 — Periodic Read
+- `echo 100 > /sys/class/misc/simtemp/sampling_ms`
+- Run CLI → expect ~10 samples/sec
 
-## Test Cases
+## T3 — Threshold Event
+- `echo 42000 > /sys/class/misc/simtemp/threshold_mC`
+- Observe CLI prints alert=1 when temp ≥ 42.0 °C
+- CLI `--test` must PASS (alert within 2 periods)
 
-| Case | Action | Input | Expected Result | Observed Result | Status |
-|------|--------|-------|----------------|----------------|--------|
-| 1    | Load module | `sudo insmod kernel/nxp_simtemp.ko` | Loads without errors | `nxp_simtemp 12288 0` in `lsmod` | ✅ |
-| 2    | Configure threshold | CLI: `threshold = 40` | Flags=1 if temp ≥ threshold | Flags=0/1 depending on temp | ✅ |
-| 3    | Configure sampling | CLI: `sampling = 1000 ms` | Readings every 1 second | Readings roughly every 1s | ✅ |
-| 4    | First reading | Open CLI | Correct temp, flags=0 if below threshold | Temp=0.000 °C, flags=0 | ⚠️ known behavior |
-| 5    | Subsequent readings | CLI runs | Correct temp and flags | Temp ≈ 41–49 °C, flags=0x1 | ✅ |
-| 6    | Unload module | `sudo rmmod nxp_simtemp` | Module removed | Verified via `lsmod` | ✅ |
-| 7    | Run demo | `./run_demo.sh` | CLI outputs readings without error | Demo completed successfully | ✅ |
+## T4 — Error Paths
+- `echo -1 > /sys/class/misc/simtemp/sampling_ms` → expect `EINVAL`
+- Very small sampling (1ms) → driver should still run (stats increments)
 
-## Notes
-- Initial reading may show 0 °C due to module init.  
-- Flags indicate threshold exceedance.  
-- CLI handles errors gracefully.  
+## T5 — Concurrency
+- Run CLI continuously + change sysfs values in parallel
+- No deadlocks or kernel oops
 
-## Next Steps
-- Test thresholds 20–60 °C.  
-- Test faster sampling (500 ms, 100 ms).  
-- Validate GUI once implemented.
+## T6 — API Contract
+- `struct simtemp_sample` size documented in header
+- CLI handles partial reads gracefully
 

@@ -1,8 +1,7 @@
-obj-m := nxp_simtemp.o
 KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
+PWD := $(shell pwd)
 
-all:
+default:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
