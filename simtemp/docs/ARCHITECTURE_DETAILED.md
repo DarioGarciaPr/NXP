@@ -11,15 +11,15 @@ The `nxp_simtemp` driver simulates a temperature sensor on Linux. This document 
 ```mermaid
 flowchart TD
     subgraph User_Space
-        CLI[User CLI /user/cli/main] -->|read/ioctl/poll| DEV[/dev/simtemp]
-        SYSFS[Sysfs /sys/class/misc/simtemp/] -->|read/write| DRIVER[NXP SimTemp Kernel Module]
+        CLI["User CLI /user/cli/main"] -->|read/ioctl/poll| DEV["/dev/simtemp"]
+        SYSFS["Sysfs /sys/class/misc/simtemp/"] -->|read/write| DRIVER["NXP SimTemp Kernel Module"]
     end
 
     subgraph Kernel_Space
-        DRIVER --> TIMER[Kernel Timer: periodic sampling]
-        DRIVER --> WORK[Workqueue: execute sample generation]
-        DRIVER --> ALERT[Threshold / Alert logic]
-        DRIVER --> DTS_NODE[DTS Node: /soc/nxp_simtemp]
+        DRIVER --> TIMER["Kernel Timer: periodic sampling"]
+        DRIVER --> WORK["Workqueue: execute sample generation"]
+        DRIVER --> ALERT["Threshold / Alert logic"]
+        DRIVER --> DTS_NODE["DTS Node: /soc/nxp_simtemp"]
     end
 
     DEV --> DRIVER
