@@ -1,4 +1,5 @@
 # Kernel build
+*.cmd
 *.ko
 *.mod.*
 *.o
