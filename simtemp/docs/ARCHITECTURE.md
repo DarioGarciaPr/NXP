@@ -18,4 +18,4 @@ flowchart TD
     TIMER --> DRIVER
     RING --> FLAGS
     FLAGS --> DEV
-    ```
+```
