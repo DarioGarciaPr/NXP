@@ -1,45 +1,34 @@
 #!/bin/bash
-# reload.sh - recarga el módulo nxp_simtemp y muestra logs
+# reload.sh - Recarga el módulo nxp_simtemp
 
-MODULE_NAME="nxp_simtemp"
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-KERNEL_DIR="$SCRIPT_DIR/../kernel"
-MODULE_PATH="$KERNEL_DIR/${MODULE_NAME}.ko"
-KDIR="/lib/modules/$(uname -r)/build"
+set -e
 
-echo "============================="
-echo "Recargando módulo $MODULE_NAME"
-echo "============================="
+MODULE_NAME=nxp_simtemp
+MODULE_PATH=../kernel
 
-# 1. Cerrar cualquier reader bloqueado
-echo "Cerrando procesos que usan /dev/$MODULE_NAME..."
-PIDS=$(lsof /dev/$MODULE_NAME | awk 'NR>1 {print $2}')
-if [ -n "$PIDS" ]; then
-    echo "Procesos encontrados: $PIDS"
-    echo "$PIDS" | xargs sudo kill -9
-else
-    echo "No hay procesos usando /dev/$MODULE_NAME"
-fi
+echo "Recargando módulo $MODULE_NAME..."
 
-# 2. Quitar módulo antiguo (si existe)
+# Elimina el módulo si ya está cargado
 if lsmod | grep -q "^$MODULE_NAME"; then
-    echo "Quitando módulo antiguo..."
-    sudo rmmod $MODULE_NAME || echo "No se pudo quitar módulo, verificar bloqueos"
+    echo "  -> Módulo ya cargado, eliminando..."
+    sudo rmmod $MODULE_NAME || true
 fi
 
-# 3. Compilar módulo
-echo "Compilando módulo..."
-make -C $KDIR M=$KERNEL_DIR modules || { echo "Error de compilación"; exit 1; }
+# Compila el módulo
+echo "  -> Compilando módulo..."
+make -C /lib/modules/$(uname -r)/build M=$(realpath $MODULE_PATH) modules
 
+# Inserta el módulo
+echo "  -> Insertando módulo..."
+sudo insmod $MODULE_PATH/$MODULE_NAME.ko
 
-# 4. Insertar módulo
-echo "Insertando módulo..."
-sudo insmod $MODULE_PATH || { echo "No se pudo insertar módulo"; exit 1; }
+# Confirma que el device node fue creado automáticamente
+DEV_NODE="/dev/$MODULE_NAME"
+if [ -e "$DEV_NODE" ]; then
+    echo "  -> Device node $DEV_NODE creado automáticamente"
+else
+    echo "  -> ATENCIÓN: Device node no encontrado. Verifica misc_register en el driver"
+fi
 
-# 5. Mostrar últimos logs del módulo
-echo "Últimos logs de dmesg:"
-sudo dmesg | tail -n 20
+echo "Módulo $MODULE_NAME recargado correctamente."
 
-echo "============================="
-echo "Módulo recargado correctamente"
-echo "============================="
