@@ -38,13 +38,13 @@ graph TD
 ```mermaid
 flowchart LR
     subgraph User_Space
-        A[User CLI (C++)] -->|read/ioctl/poll| B[/dev/simtemp]
-        C[Sysfs] -->|read/write| D[NXP SimTemp Kernel Module]
+        A["User CLI (C++)"] -->|read/ioctl/poll| B["/dev/simtemp"]
+        C["Sysfs"] -->|read/write| D["NXP SimTemp Kernel Module"]
     end
 
     subgraph Kernel_Space
-        D --> E[Timer + Workqueue]
-        D --> F[DTS Node: /soc/nxp_simtemp] 
+        D --> E["Timer + Workqueue"]
+        D --> F["DTS Node: /soc/nxp_simtemp"] 
     end
 
     B --> D
