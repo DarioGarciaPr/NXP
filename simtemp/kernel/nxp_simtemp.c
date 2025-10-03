@@ -1,255 +1,250 @@
 #include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/fs.h>
-#include <linux/uaccess.h>
+#include <linux/platform_device.h>
 #include <linux/miscdevice.h>
-#include <linux/poll.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 #include <linux/hrtimer.h>
 #include <linux/workqueue.h>
-#include <linux/slab.h>
 #include <linux/of.h>
-#include <linux/platform_device.h>
-#include "nxp_simtemp.h"
-#include "nxp_simtemp_ioctl.h"
+#include <linux/poll.h>
+#include <linux/types.h>
+#include <linux/random.h>
 
-#define DEVICE_NAME "simtemp"
+#define RING_SIZE 128
 
-static struct simtemp_device *gdev;
+#define FLAG_NEW_SAMPLE        (1 << 0)
+#define FLAG_THRESHOLD_CROSSED (1 << 1)
 
-/* === Helper functions === */
-static void simtemp_push_sample(struct simtemp_device *dev, s32 temp_mC, bool alert)
-{
-    unsigned long flags;
-    struct simtemp_sample_internal s;
+struct simtemp_sample {
+    __u64 timestamp_ns;
+    __s32 temp_mC;
+    __u32 flags;
+} __attribute__((packed));
 
-    s.data.timestamp_ns = ktime_get_ns();
-    s.data.temp_mC = temp_mC;
-    s.data.flags = 1; // NEW_SAMPLE
-    if (alert)
-        s.data.flags |= (1 << 1);
+struct simtemp_dev {
+    struct miscdevice miscdev;
+    struct simtemp_sample ring[RING_SIZE];
+    int head;
+    int tail;
+    int threshold_mC;
+    int sampling_ms;
+    struct hrtimer timer;
+    struct work_struct work;
+    wait_queue_head_t wq;
+};
 
-    spin_lock_irqsave(&dev->ring_lock, flags);
-    dev->ring[dev->head] = s;
-    dev->head = (dev->head + 1) % SIMTEMP_RING_SIZE;
-    if (dev->head == dev->tail) // overwrite
-        dev->tail = (dev->tail + 1) % SIMTEMP_RING_SIZE;
-    spin_unlock_irqrestore(&dev->ring_lock, flags);
+static struct simtemp_dev *simdev;
 
-    wake_up_interruptible(&dev->wq);
-}
-
-/* === Work handler === */
+/* Workqueue handler */
 static void simtemp_work_handler(struct work_struct *work)
 {
-    struct simtemp_device *dev = gdev;
-    s32 temp = 40000 + (prandom_u32() % 2000); // 40.0C to 42.0C
-    bool alert = (temp >= dev->config.threshold_mC);
+    struct simtemp_sample *s;
+    s32 temp;
 
-    dev->stats.updates++;
-    if (alert)
-        dev->stats.alerts++;
+    temp = 40000 + (get_random_u32() % 2000); // 40.0C a 42.0C
+    s = &simdev->ring[simdev->head];
+    s->timestamp_ns = ktime_get_ns();
+    s->temp_mC = temp;
+    s->flags = FLAG_NEW_SAMPLE;
+    if (temp >= simdev->threshold_mC)
+        s->flags |= FLAG_THRESHOLD_CROSSED;
 
-    simtemp_push_sample(dev, temp, alert);
+    simdev->head = (simdev->head + 1) % RING_SIZE;
+    wake_up_interruptible(&simdev->wq);
 }
 
-/* === Timer callback === */
+/* Timer callback */
 static enum hrtimer_restart simtemp_timer_cb(struct hrtimer *timer)
 {
-    struct simtemp_device *dev = gdev;
-    schedule_work(&dev->work);
-    hrtimer_forward_now(timer, ms_to_ktime(dev->config.sampling_ms));
+    schedule_work(&simdev->work);
+    hrtimer_forward_now(timer, ms_to_ktime(simdev->sampling_ms));
     return HRTIMER_RESTART;
 }
 
-/* === File ops === */
-static ssize_t simtemp_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
+/* Sysfs attributes */
+static ssize_t threshold_mC_show(struct device *dev,
+                                 struct device_attribute *attr, char *buf)
 {
-    struct simtemp_device *dev = gdev;
-    struct simtemp_sample_internal s;
-    unsigned long flags;
-    int ret;
-
-    if (len < sizeof(struct simtemp_sample))
-        return -EINVAL;
-
-    if (dev->head == dev->tail) {
-        if (filp->f_flags & O_NONBLOCK)
-            return -EAGAIN;
-        wait_event_interruptible(dev->wq, dev->head != dev->tail);
-    }
-
-    spin_lock_irqsave(&dev->ring_lock, flags);
-    if (dev->head == dev->tail) {
-        spin_unlock_irqrestore(&dev->ring_lock, flags);
-        return -EAGAIN;
-    }
-    s = dev->ring[dev->tail];
-    dev->tail = (dev->tail + 1) % SIMTEMP_RING_SIZE;
-    spin_unlock_irqrestore(&dev->ring_lock, flags);
-
-    ret = copy_to_user(buf, &s.data, sizeof(s.data));
-    if (ret)
-        return -EFAULT;
-
-    return sizeof(s.data);
+    return sprintf(buf, "%d\n", simdev->threshold_mC);
 }
 
-static __poll_t simtemp_poll(struct file *filp, poll_table *wait)
+static ssize_t threshold_mC_store(struct device *dev,
+                                  struct device_attribute *attr, const char *buf, size_t count)
 {
-    struct simtemp_device *dev = gdev;
-    __poll_t mask = 0;
+    int val;
+    if (kstrtoint(buf, 10, &val))
+        return -EINVAL;
+    simdev->threshold_mC = val;
+    pr_info("Threshold set to %d\n", val);
+    return count;
+}
 
-    poll_wait(filp, &dev->wq, wait);
+static ssize_t sampling_ms_show(struct device *dev,
+                                struct device_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%d\n", simdev->sampling_ms);
+}
 
-    if (dev->head != dev->tail)
+static ssize_t sampling_ms_store(struct device *dev,
+                                 struct device_attribute *attr, const char *buf, size_t count)
+{
+    int val;
+    if (kstrtoint(buf, 10, &val))
+        return -EINVAL;
+    simdev->sampling_ms = val;
+    pr_info("Sampling interval set to %d ms\n", val);
+    return count;
+}
+
+static DEVICE_ATTR_RW(threshold_mC);
+static DEVICE_ATTR_RW(sampling_ms);
+
+static struct attribute *simtemp_attrs[] = {
+    &dev_attr_threshold_mC.attr,
+    &dev_attr_sampling_ms.attr,
+    NULL
+};
+static struct attribute_group simtemp_group = {
+    .attrs = simtemp_attrs,
+};
+
+/* File operations */
+static int simtemp_open(struct inode *inode, struct file *file) { return 0; }
+static int simtemp_release(struct inode *inode, struct file *file) { return 0; }
+
+static ssize_t simtemp_read(struct file *file, char __user *buf,
+                            size_t count, loff_t *ppos)
+{
+    struct simtemp_sample *s;
+    unsigned int tail = simdev->tail;
+
+    if (tail == simdev->head)
+        return 0;
+
+    s = &simdev->ring[tail];
+    if (copy_to_user(buf, s, sizeof(*s)))
+        return -EFAULT;
+
+    simdev->tail = (tail + 1) % RING_SIZE;
+    return sizeof(*s);
+}
+
+static unsigned int simtemp_poll(struct file *file, poll_table *wait)
+{
+    unsigned int mask = 0;
+
+    poll_wait(file, &simdev->wq, wait);
+
+    if (simdev->head != simdev->tail)
         mask |= POLLIN | POLLRDNORM;
 
     return mask;
 }
 
-static long simtemp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-    struct simtemp_device *dev = gdev;
-
-    switch (cmd) {
-    case SIMTEMP_IOC_RESET_STATS:
-        dev->stats.updates = dev->stats.alerts = dev->stats.errors = 0;
-        return 0;
-    case SIMTEMP_IOC_GET_STATS: {
-        struct simtemp_stats s = {
-            .updates = dev->stats.updates,
-            .alerts = dev->stats.alerts,
-            .errors = dev->stats.errors,
-        };
-        if (copy_to_user((void __user *)arg, &s, sizeof(s)))
-            return -EFAULT;
-        return 0;
-    }
-    default:
-        return -ENOTTY;
-    }
-}
-
 static const struct file_operations simtemp_fops = {
-    .owner          = THIS_MODULE,
-    .read           = simtemp_read,
-    .poll           = simtemp_poll,
-    .unlocked_ioctl = simtemp_ioctl,
-    .llseek         = no_llseek,
+    .owner = THIS_MODULE,
+    .open = simtemp_open,
+    .release = simtemp_release,
+    .read = simtemp_read,
+    .poll = simtemp_poll,
 };
 
-/* === Sysfs attrs === */
-static ssize_t sampling_ms_show(struct device *devdev, struct device_attribute *attr, char *buf)
-{
-    return sprintf(buf, "%u\n", gdev->config.sampling_ms);
-}
-static ssize_t sampling_ms_store(struct device *devdev, struct device_attribute *attr, const char *buf, size_t count)
-{
-    unsigned long val;
-    if (kstrtoul(buf, 10, &val))
-        return -EINVAL;
-    gdev->config.sampling_ms = val;
-    return count;
-}
-static DEVICE_ATTR_RW(sampling_ms);
-
-static ssize_t threshold_mC_show(struct device *devdev, struct device_attribute *attr, char *buf)
-{
-    return sprintf(buf, "%d\n", gdev->config.threshold_mC);
-}
-static ssize_t threshold_mC_store(struct device *devdev, struct device_attribute *attr, const char *buf, size_t count)
-{
-    long val;
-    if (kstrtol(buf, 10, &val))
-        return -EINVAL;
-    gdev->config.threshold_mC = val;
-    return count;
-}
-static DEVICE_ATTR_RW(threshold_mC);
-
-static ssize_t stats_show(struct device *devdev, struct device_attribute *attr, char *buf)
-{
-    return sprintf(buf, "updates=%llu alerts=%llu errors=%llu\n",
-                   gdev->stats.updates, gdev->stats.alerts, gdev->stats.errors);
-}
-static DEVICE_ATTR_RO(stats);
-
-static struct attribute *simtemp_attrs[] = {
-    &dev_attr_sampling_ms.attr,
-    &dev_attr_threshold_mC.attr,
-    &dev_attr_stats.attr,
-    NULL,
-};
-ATTRIBUTE_GROUPS(simtemp);
-
-/* === Platform driver === */
+/* Probe / Remove */
 static int simtemp_probe(struct platform_device *pdev)
 {
     int ret;
-    struct simtemp_device *dev;
 
-    dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-    if (!dev)
+    simdev = kzalloc(sizeof(*simdev), GFP_KERNEL);
+    if (!simdev)
         return -ENOMEM;
-    gdev = dev;
 
-    dev->config.sampling_ms = 100;
-    dev->config.threshold_mC = 42000;
-    dev->config.mode = 0;
+    simdev->miscdev.minor = MISC_DYNAMIC_MINOR;
+    simdev->miscdev.name  = "simtemp";
+    simdev->miscdev.fops  = &simtemp_fops;
 
-    spin_lock_init(&dev->ring_lock);
-    mutex_init(&dev->config_lock);
-    init_waitqueue_head(&dev->wq);
-
-    INIT_WORK(&dev->work, simtemp_work_handler);
-    hrtimer_init(&dev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-    dev->timer.function = simtemp_timer_cb;
-    hrtimer_start(&dev->timer, ms_to_ktime(dev->config.sampling_ms), HRTIMER_MODE_REL);
-
-    dev->miscdev.minor = MISC_DYNAMIC_MINOR;
-    dev->miscdev.name  = DEVICE_NAME;
-    dev->miscdev.fops  = &simtemp_fops;
-    dev->miscdev.groups = simtemp_groups;
-
-    ret = misc_register(&dev->miscdev);
+    ret = misc_register(&simdev->miscdev);
     if (ret) {
-        kfree(dev);
+        kfree(simdev);
         return ret;
     }
 
-    dev_info(&pdev->dev, "nxp_simtemp probed\n");
+    init_waitqueue_head(&simdev->wq);
+    INIT_WORK(&simdev->work, simtemp_work_handler);
+
+    simdev->sampling_ms = 1000;
+    simdev->threshold_mC = 45000;
+    hrtimer_init(&simdev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    simdev->timer.function = simtemp_timer_cb;
+    hrtimer_start(&simdev->timer, ms_to_ktime(simdev->sampling_ms), HRTIMER_MODE_REL);
+
+    ret = sysfs_create_group(&simdev->miscdev.this_device->kobj, &simtemp_group);
+    if (ret) {
+        misc_deregister(&simdev->miscdev);
+        kfree(simdev);
+        return ret;
+    }
+
+    pr_info("nxp_simtemp probe successful\n");
     return 0;
 }
 
-static int simtemp_remove(struct platform_device *pdev)
+static void simtemp_remove(struct platform_device *pdev)
 {
-    struct simtemp_device *dev = gdev;
-    hrtimer_cancel(&dev->timer);
-    cancel_work_sync(&dev->work);
-    misc_deregister(&dev->miscdev);
-    kfree(dev);
-    return 0;
+    hrtimer_cancel(&simdev->timer);
+    cancel_work_sync(&simdev->work);
+    sysfs_remove_group(&simdev->miscdev.this_device->kobj, &simtemp_group);
+    misc_deregister(&simdev->miscdev);
+    kfree(simdev);
 }
 
 static const struct of_device_id simtemp_of_match[] = {
     { .compatible = "nxp,simtemp", },
-    { },
+    { /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, simtemp_of_match);
 
 static struct platform_driver simtemp_driver = {
+    .probe  = simtemp_probe,
+    .remove = simtemp_remove,
     .driver = {
         .name = "nxp_simtemp",
         .of_match_table = simtemp_of_match,
     },
-    .probe = simtemp_probe,
-    .remove = simtemp_remove,
 };
 
-module_platform_driver(simtemp_driver);
+/* Platform device para demo en PC/Linux */
+static struct platform_device *simtemp_pdev;
+
+static int __init simtemp_init(void)
+{
+    int ret;
+
+    simtemp_pdev = platform_device_register_simple("nxp_simtemp", -1, NULL, 0);
+    if (IS_ERR(simtemp_pdev))
+        return PTR_ERR(simtemp_pdev);
+
+    ret = platform_driver_register(&simtemp_driver);
+    if (ret) {
+        platform_device_unregister(simtemp_pdev);
+        return ret;
+    }
+
+    pr_info("nxp_simtemp module loaded (PC/Linux demo)\n");
+    return 0;
+}
+
+static void __exit simtemp_exit(void)
+{
+    platform_driver_unregister(&simtemp_driver);
+    platform_device_unregister(simtemp_pdev);
+    pr_info("nxp_simtemp module unloaded\n");
+}
+
+module_init(simtemp_init);
+module_exit(simtemp_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Dario Garcia");
-MODULE_DESCRIPTION("NXP Simulated Temperature Sensor");
+MODULE_AUTHOR("Darío García");
+MODULE_DESCRIPTION("NXP Simulated Temperature Kernel Module");
 

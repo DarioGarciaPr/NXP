@@ -1,34 +1,47 @@
 #!/bin/bash
-# reload.sh - Recarga el módulo nxp_simtemp
+# reload.sh - reload nxp_simtemp kernel module for testing
 
-set -e
+MODULE_NAME="nxp_simtemp"
+KO_FILE="kernel/nxp_simtemp.ko"
+DEV_FILE="/dev/simtemp"
 
-MODULE_NAME=nxp_simtemp
-MODULE_PATH=../kernel
+echo "=== Reloading $MODULE_NAME module ==="
 
-echo "Recargando módulo $MODULE_NAME..."
-
-# Elimina el módulo si ya está cargado
+# Remove module if loaded
 if lsmod | grep -q "^$MODULE_NAME"; then
-    echo "  -> Módulo ya cargado, eliminando..."
-    sudo rmmod $MODULE_NAME || true
+    echo "Removing existing module..."
+    sudo rmmod $MODULE_NAME
+    sleep 1
 fi
 
-# Compila el módulo
-echo "  -> Compilando módulo..."
-make -C /lib/modules/$(uname -r)/build M=$(realpath $MODULE_PATH) modules
+# Insert module
+echo "Inserting module..."
+sudo insmod $KO_FILE
 
-# Inserta el módulo
-echo "  -> Insertando módulo..."
-sudo insmod $MODULE_PATH/$MODULE_NAME.ko
-
-# Confirma que el device node fue creado automáticamente
-DEV_NODE="/dev/$MODULE_NAME"
-if [ -e "$DEV_NODE" ]; then
-    echo "  -> Device node $DEV_NODE creado automáticamente"
+# Check if module loaded
+if lsmod | grep -q "^$MODULE_NAME"; then
+    echo "$MODULE_NAME loaded successfully."
 else
-    echo "  -> ATENCIÓN: Device node no encontrado. Verifica misc_register en el driver"
+    echo "Error: $MODULE_NAME did not load."
+    dmesg | tail -20
+    exit 1
 fi
 
-echo "Módulo $MODULE_NAME recargado correctamente."
+# Verify /dev/simtemp
+if [ -e $DEV_FILE ]; then
+    echo "$DEV_FILE exists."
+else
+    echo "Warning: $DEV_FILE does not exist."
+fi
+
+# Show sysfs attributes
+SYSFS_DIR="/sys/class/misc/simtemp"
+if [ -d "$SYSFS_DIR" ]; then
+    echo "Sysfs attributes:"
+    ls -l $SYSFS_DIR
+else
+    echo "Warning: Sysfs directory $SYSFS_DIR not found."
+fi
+
+echo "=== Module reload complete ==="
 

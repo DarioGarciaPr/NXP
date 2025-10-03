@@ -1,76 +1,99 @@
-// user/cli/main.cpp
-#include <iostream>
-#include <fstream>
-#include <chrono>
-#include <iomanip>
 #include <fcntl.h>
-#include <unistd.h>
 #include <poll.h>
-#include <cstring>
-#include <cstdint>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fstream>
 
-// Estructura del registro (debe coincidir con kernel)
 struct simtemp_sample {
-    uint64_t timestamp_ns; // monotonic timestamp
-    int32_t temp_mC;       // milli-degree Celsius
-    uint32_t flags;        // bit0=NEW_SAMPLE, bit1=THRESHOLD_CROSSED
+    uint64_t timestamp_ns;
+    int32_t temp_mC;
+    uint32_t flags;
 } __attribute__((packed));
 
 #define FLAG_NEW_SAMPLE        0x1
 #define FLAG_THRESHOLD_CROSSED 0x2
 
-int main(int argc, char* argv[]) {
-    const char* dev_path = "/dev/simtemp";
-    int sampling_ms = 100;
-    int threshold_mC = 45000;
+const char *DEV_PATH = "/dev/simtemp";
+const char *SYSFS_PATH = "/sys/class/misc/simtemp/";
 
-    // parse args simples
-    for (int i=1; i<argc; i++) {
-        if (strcmp(argv[i], "--sampling") == 0 && i+1<argc) sampling_ms = std::stoi(argv[++i]);
-        if (strcmp(argv[i], "--threshold") == 0 && i+1<argc) threshold_mC = std::stoi(argv[++i]);
-    }
+bool write_sysfs(const char* file, const char* value) {
+    std::ofstream ofs(file);
+    if (!ofs.is_open()) return false;
+    ofs << value;
+    return true;
+}
 
-    std::cout << "Opening device: " << dev_path << std::endl;
-    int fd = open(dev_path, O_RDONLY | O_NONBLOCK);
+void print_sample(const simtemp_sample &s) {
+    time_t sec = s.timestamp_ns / 1000000000;
+    long nsec = s.timestamp_ns % 1000000000;
+    char timestr[64];
+    struct tm tm_info;
+    gmtime_r(&sec, &tm_info);
+    strftime(timestr, sizeof(timestr), "%Y-%m-%dT%H:%M:%S", &tm_info);
+
+    printf("%s.%09ld temp=%.3fC alert=%s\n",
+           timestr, nsec,
+           s.temp_mC / 1000.0,
+           (s.flags & FLAG_THRESHOLD_CROSSED) ? "YES" : "NO");
+}
+
+int main() {
+    int fd = open(DEV_PATH, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         perror("open");
         return 1;
     }
 
-    std::cout << "Starting poll loop..." << std::endl;
+    printf("=== Test: API Contract ===\n");
+    printf("sizeof(simtemp_sample)=%zu bytes\n", sizeof(simtemp_sample));
 
-    struct pollfd pfd;
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-
-    while (true) {
-        int ret = poll(&pfd, 1, -1); // wait indefinitely
-        if (ret < 0) {
-            perror("poll");
-            break;
+    // T2: Periodic Read
+    printf("=== Test: Periodic Read ===\n");
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    for (int i = 0; i < 5; i++) {
+        int ret = poll(&pfd, 1, 2000); // 2s timeout
+        if (ret <= 0) {
+            printf("Timeout o error en poll\n");
+            continue;
         }
+        simtemp_sample s;
+        ssize_t n = read(fd, &s, sizeof(s));
+        if (n == sizeof(s)) print_sample(s);
+    }
 
-        if (pfd.revents & POLLIN) {
-            simtemp_sample sample;
-            ssize_t n = read(fd, &sample, sizeof(sample));
-            if (n == sizeof(sample)) {
-                auto ts = std::chrono::nanoseconds(sample.timestamp_ns);
-                auto secs = std::chrono::duration_cast<std::chrono::seconds>(ts);
-                auto ns = ts - secs;
-                std::time_t t_c = secs.count();
-                std::tm tm = *std::gmtime(&t_c);
+    // T3: Threshold Event
+    printf("=== Test: Threshold Event ===\n");
+    char thresh_file[128];
+    snprintf(thresh_file, sizeof(thresh_file), "%sthreshold_mC", SYSFS_PATH);
+    if (!write_sysfs(thresh_file, "0")) {
+        printf("No se pudo escribir threshold\n");
+    }
 
-                std::cout << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S")
-                          << "." << std::setw(9) << std::setfill('0') << ns.count()
-                          << "Z "
-                          << "temp=" << sample.temp_mC / 1000.0 << "C"
-                          << " alert=" << ((sample.flags & FLAG_THRESHOLD_CROSSED)?1:0)
-                          << std::endl;
-            }
+    for (int i = 0; i < 3; i++) {
+        int ret = poll(&pfd, 1, 2000);
+        if (ret > 0) {
+            simtemp_sample s;
+            ssize_t n = read(fd, &s, sizeof(s));
+            if (n == sizeof(s)) print_sample(s);
         }
     }
 
+    // T4: Error Paths
+    printf("=== Test: Error Paths ===\n");
+    char invalid_file[128];
+    snprintf(invalid_file, sizeof(invalid_file), "%sinvalid_attr", SYSFS_PATH);
+    if (!write_sysfs(invalid_file, "123")) {
+        printf("Correctamente falló escritura inválida\n");
+    }
+
     close(fd);
+    printf("=== Test completado ===\n");
     return 0;
 }
 

@@ -1,13 +1,11 @@
 #!/bin/bash
 set -e
 
-KDIR="/lib/modules/$(uname -r)/build"
+echo "=== Compilando kernel module ==="
+make -C /lib/modules/$(uname -r)/build M=$(pwd)/kernel modules
 
-echo "[*] Building kernel module..."
-make -C ../kernel KDIR=$KDIR
+echo "=== Compilando CLI C++ ==="
+g++ -std=c++17 -O2 -o user/cli/simtemp_cli user/cli/main.cpp
 
-echo "[*] Building user CLI..."
-g++ -Wall -O2 -o ../user/cli/simtemp_cli ../user/cli/main.cpp
-
-echo "[*] Build complete"
+echo "=== Build completado ==="
 
