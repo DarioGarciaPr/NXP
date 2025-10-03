@@ -19,7 +19,7 @@ flowchart TD
         DRIVER --> TIMER["Kernel Timer: periodic sampling"]
         DRIVER --> WORK["Workqueue: execute sample generation"]
         DRIVER --> ALERT["Threshold / Alert logic"]
-        DRIVER --> DTS_NODE["DTS Node: /soc/nxp_simtemp"]
+        DTS_NODE["DTS Node: /soc/nxp_simtemp"] --> DRIVER
     end
 
     DEV --> DRIVER

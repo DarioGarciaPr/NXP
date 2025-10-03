@@ -44,7 +44,7 @@ flowchart LR
 
     subgraph Kernel_Space
         D --> E["Timer + Workqueue"]
-        D --> F["DTS Node: /soc/nxp_simtemp"] 
+        F["DTS Node: /soc/nxp_simtemp"] --> D
     end
 
     B --> D
