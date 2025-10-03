@@ -3,23 +3,23 @@
 ```mermaid
 flowchart TD
     %% User space
-    CLI[User CLI / C++ / Python] 
-    DEV[/dev/simtemp/char device/]
-    SYSFS[Sysfs config: sampling_ms, threshold_mC, stats]
+    CLI["User CLI / C++ / Python"] 
+    DEV["/dev/simtemp/char device"]
+    SYSFS["Sysfs config:\nsampling_ms, threshold_mC, stats"]
 
     %% Kernel driver internals
-    DRIVER[nxp_simtemp Kernel Module]
-    RING[Ring Buffer<br/>size=128]
-    TIMER[HR Timer → Workqueue]
+    DRIVER["nxp_simtemp Kernel Module"]
+    RING["Ring Buffer\nsize=128"]
+    TIMER["HR Timer → Workqueue"]
     
     %% Flags
-    FLAGS["Sample Flags:<br/>bit0=NEW_SAMPLE<br/>bit1=THRESHOLD_CROSSED"]
+    FLAGS["Sample Flags:\nbit0=NEW_SAMPLE\nbit1=THRESHOLD_CROSSED"]
 
     %% User interactions
-    CLI -- "read()" --> DEV
-    CLI -- "poll()/epoll()" --> DEV
-    CLI -- "ioctl()" --> DEV
-    CLI -- "echo/write" --> SYSFS
+    CLI -->|read()| DEV
+    CLI -->|poll()/epoll()| DEV
+    CLI -->|ioctl()| DEV
+    CLI -->|echo/write| SYSFS
 
     %% Driver -> Kernel internals
     DEV --> DRIVER
@@ -30,17 +30,6 @@ flowchart TD
     TIMER --> DRIVER
 
     %% Ring buffer logic
-    RING -- "store new sample" --> FLAGS
-    FLAGS -- "wake_up(wait_queue)" --> DEV
-
----
-
-### Explicación visual
-
-- **CLI** → lee `/dev/simtemp`, espera eventos con `poll/epoll`.
-- **Sysfs** → configura sampling interval y threshold.
-- **Kernel driver** → contiene el **ring buffer**, mantiene **flags** y dispara alertas.
-- **Timer + Workqueue** → genera nuevas muestras periódicas.
-- **Ring buffer + flags** → despierta procesos bloqueados en `poll()` cuando hay **new sample** o **threshold crossed**.
-
+    RING -->|store new sample| FLAGS
+    FLAGS -->|wake_up(wait_queue)| DEV
 
