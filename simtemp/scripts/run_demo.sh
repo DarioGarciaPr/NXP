@@ -1,31 +1,32 @@
 #!/bin/bash
-set -e
+# run_demo.sh
+# Script para cargar módulo y ejecutar demo CLI
 
-echo "Demo de simtemp"
-echo "================================="
+set -e  # salir si hay algún error
 
-# 1/4 Recargando módulo
-echo "[1/4] Recargando módulo..."
-if lsmod | grep -q nxp_simtemp; then
-    sudo rmmod nxp_simtemp
+# Obtener directorio del script
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Paths
+KERNEL_MODULE="$SCRIPT_DIR/../kernel/nxp_simtemp.ko"
+CLI_BIN="$SCRIPT_DIR/../user/cli/main"
+
+echo "=== Desmontando módulo previo (si existe) ==="
+sudo rmmod nxp_simtemp 2>/dev/null || true
+
+echo "=== Insertando módulo ==="
+sudo insmod "$KERNEL_MODULE"
+
+echo "=== Verificando que el módulo esté cargado ==="
+lsmod | grep nxp_simtemp || echo "Módulo no cargado"
+
+echo "=== Ejecutando demo CLI (C++) ==="
+if [ ! -f "$CLI_BIN" ]; then
+    echo "El binario CLI no existe. Compilando main.cpp..."
+    g++ -o "$CLI_BIN" "$(dirname "$CLI_BIN")/main.cpp"
 fi
 
-make -C /lib/modules/$(uname -r)/build M=$(pwd)/kernel modules
-sudo insmod kernel/nxp_simtemp.ko
+"$CLI_BIN"
 
-# 2/4 Creando device node (si es necesario)
-echo "[2/4] Creando device node..."
-if [ ! -e /dev/nxp_simtemp ]; then
-    sudo mknod /dev/nxp_simtemp c $(grep nxp_simtemp /proc/devices | awk '{print $1}') 0
-fi
-
-# 3/4 Compilando CLI
-echo "[3/4] Compilando CLI..."
-g++ -o ..user/cli/main ..user/cli/main.cpp
-
-# 4/4 Ejecutando demo
-echo "[4/4] Ejecutando demo..."
-sudo ./user/cli/main
-
-echo "Demo finalizada."
+echo "=== Demo completada ==="
 

@@ -1,32 +1,20 @@
 #!/bin/bash
-set -e   # si algo falla, se detiene
+set -e
 
-echo "================================="
-echo " Compilando proyecto simtemp"
-echo "================================="
+# Navegar al directorio del script
+cd "$(dirname "$0")"
 
-# Ruta base del proyecto (directorio donde está este script)
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# -------------------------------
-# 1. Compilar el módulo del kernel
-# -------------------------------
-echo "[1/2] Compilando módulo kernel..."
-cd "$PROJECT_ROOT/kernel"
+echo "=== Compilando módulo kernel ==="
+cd ../kernel
 make clean || true
 make
-echo "Kernel module compilado"
+cd ..
 
-# -------------------------------
-# 2. Compilar la app de usuario (CLI)
-# -------------------------------
-echo "[2/2] Compilando aplicación CLI..."
-cd "$PROJECT_ROOT/user/cli"
-make clean || true
-make
-echo "CLI compilado"
+echo "=== Compilando CLI (C++) ==="
+CLI_DIR="user/cli"
+KERNEL_DIR="kernel"
 
-echo "================================="
-echo " Build completado!"
-echo "================================="
+g++ -std=c++17 -Wall -Wextra -I"$KERNEL_DIR" -o "$CLI_DIR/main" "$CLI_DIR/main.cpp"
+
+echo "=== Compilación completada ==="
 
