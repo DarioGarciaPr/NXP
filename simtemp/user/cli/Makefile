@@ -1,13 +1,15 @@
-CXX = g++
-CXXFLAGS = -std=c++17 -Wall
+CXX := g++
+CXXFLAGS := -Wall -Wextra -O2 -std=c++17
+TARGET := main
+SRC := main.cpp
 
-TARGET = simtemp_cli
-SRCS = main.cpp
+INCLUDES := -I../../kernel
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRCS)
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SRC) -o $(TARGET)
 
 clean:
 	rm -f $(TARGET)
+

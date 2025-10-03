@@ -1,45 +1,40 @@
 #include <iostream>
-#include <fstream>
-#include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <cstdint>
-#include <ctime>
-
-struct simtemp_sample {
-    uint64_t timestamp_ns;
-    int32_t temp_mC;
-    uint32_t flags;
-} __attribute__((packed));
+#include <sys/ioctl.h>
+#include "nxp_simtemp_ioctl.h"
 
 int main() {
-    const char* device = "/dev/simtemp";
-    int fd = open(device, O_RDONLY | O_NONBLOCK);
-    if(fd < 0) {
-        std::cerr << "Error: cannot open " << device << std::endl;
+    const char* device = "/dev/nxp_simtemp";
+    int fd = open(device, O_RDONLY);
+    if (fd < 0) {
+        perror("Error abriendo dispositivo");
         return 1;
     }
 
-    struct pollfd pfd;
-    pfd.fd = fd;
-    pfd.events = POLLIN;
+    int threshold = 40;      // °C
+    int sampling = 1000;     // ms
 
-    std::cout << "Waiting for samples...\n";
+    if (ioctl(fd, NXPSIM_IOCTL_SET_THRESHOLD, &threshold) < 0)
+        perror("Error configurando threshold");
 
-    while(true) {
-        int ret = poll(&pfd, 1, 1000); // 1s timeout
-        if(ret > 0 && (pfd.revents & POLLIN)) {
-            simtemp_sample s;
-            ssize_t r = read(fd, &s, sizeof(s));
-            if(r == sizeof(s)) {
-                double tempC = s.temp_mC / 1000.0;
-                std::time_t t = s.timestamp_ns / 1000000000;
-                std::cout << std::ctime(&t) << " temp=" << tempC
-                          << "C alert=" << ((s.flags & 0x2) ? 1 : 0) << "\n";
-            }
+    if (ioctl(fd, NXPSIM_IOCTL_SET_SAMPLING_MS, &sampling) < 0)
+        perror("Error configurando sampling");
+
+    char buf[128];
+
+    while (true) {
+        int n = read(fd, buf, sizeof(buf)-1);
+        if (n > 0) {
+            buf[n] = '\0';
+            std::cout << buf;
+        } else {
+            perror("Error leyendo temperatura");
         }
+        usleep(sampling * 1000); // esperar tiempo de muestreo
     }
 
     close(fd);
     return 0;
 }
+
