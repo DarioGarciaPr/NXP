@@ -1,6 +1,6 @@
 # Kernel build
 *.ko
-*.mod.c
+*.mod.*
 *.o
 *.symvers
 *.order
