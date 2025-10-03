@@ -78,7 +78,19 @@ flowchart LR
 
 ---
 
-## 4. User Interfaces
+## 4. Device Tree
+
+- Node: nxp-simtemp
+- Location: kernel/dts/nxp-simtemp.dtsi
+- Properties:
+  - compatible = "nxp,simtemp";
+  - reg = <0x0 0x0 0x0 0x0>; (placeholder)
+  - sampling-ms = <1000>; (default sample period)
+  - threshold-mC = <42000>; (default threshold)
+
+*Rationale:* future-proofing for embedded platforms; currently no DTS binding is implemented in the driver.
+
+## 5. User Interfaces
 
 ### Sysfs
 - `sampling_ms` → controls period (ms).
@@ -96,7 +108,7 @@ flowchart LR
 
 ---
 
-## 5. User CLI
+## 6. User CLI
 
 - Implements normal mode (continuous logging).
 - Implements `--test` mode:
@@ -106,7 +118,7 @@ flowchart LR
 
 ---
 
-## 6. Concurrency Model
+## 7. Concurrency Model
 
 - **Single-threaded timer → workqueue** ensures periodic execution.
 - **Multiple readers** supported:
@@ -115,16 +127,17 @@ flowchart LR
 
 ---
 
-## 7. Extensibility
+## 8. Extensibility
 
 Possible future improvements:
 - Expose multiple sensors (`/dev/simtempX`).
 - Add netlink interface for async alerts.
 - Replace simulated data with real ADC/HW source.
+- Implement DTS integration for embedded platforms
 
 ---
 
-## 8. Design Decisions
+## 9. Design Decisions
 
 1. **Miscdevice** instead of static major/minor
    - Auto-allocated minor.
@@ -144,7 +157,7 @@ Possible future improvements:
 
 ---
 
-## 9. Example Interaction
+## 10. Example Interaction
 
 $ sudo insmod nxp_simtemp.ko
 $ ls /dev/simtemp
@@ -157,7 +170,7 @@ $ ./simtemp_cli
 
 ---
 
-## 10. Testing
+## 11. Testing
 
 See [TESTPLAN.md](TESTPLAN.md) for full test matrix.
 
