@@ -1,6 +1,3 @@
-# nxp_simtemp Detailed Architecture
-
-```mermaid
 flowchart TD
     %% User space
     CLI["User CLI / C++ / Python"] 
@@ -16,20 +13,20 @@ flowchart TD
     FLAGS["Sample Flags:\nbit0=NEW_SAMPLE\nbit1=THRESHOLD_CROSSED"]
 
     %% User interactions
-    CLI -->|read()| DEV
-    CLI -->|poll()/epoll()| DEV
-    CLI -->|ioctl()| DEV
-    CLI -->|echo/write| SYSFS
+    CLI --> DEV
+    CLI --> SYSFS
 
-    %% Driver -> Kernel internals
+    %% Device interactions
     DEV --> DRIVER
     SYSFS --> DRIVER
+
+    %% Driver internals
     DRIVER --> RING
     DRIVER --> FLAGS
     DRIVER --> TIMER
     TIMER --> DRIVER
 
     %% Ring buffer logic
-    RING -->|store new sample| FLAGS
-    FLAGS -->|wake_up(wait_queue)| DEV
+    RING --> FLAGS
+    FLAGS --> DEV
 
