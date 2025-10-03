@@ -1,3 +1,2 @@
 # Indica que nxp_simtemp.o es un módulo a compilar
 obj-m := nxp_simtemp.o
-

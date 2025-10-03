@@ -7,35 +7,46 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
+#include <linux/poll.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/platform_device.h>
 
-#include "nxp_simtemp_ioctl.h"  // Define tus IOCTLs: NXPSIM_IOCTL_SET_THRESHOLD, NXPSIM_IOCTL_SET_SAMPLING_MS
+#include "nxp_simtemp_ioctl.h"  // Defines NXPSIM_IOCTL_SET_THRESHOLD, NXPSIM_IOCTL_SET_SAMPLING_MS
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Darío García");
-MODULE_DESCRIPTION("Simulador de sensor de temperatura NXP");
+MODULE_DESCRIPTION("NXP temperature sensor simulator with DT and poll");
 
-// Estructura para los datos de la muestra
+// Structure for temperature sample data
 struct temp_sample {
-    int temp_mC;   // Temperatura en milicelsius
+    int temp_mC;   // Temperature in milliCelsius
     int flags;
 };
 
-// Variables globales del módulo
+// Global variables
 static struct temp_sample latest_sample;
-static int simtemp_threshold = 45000;      // Umbral por defecto 45°C
-static int simtemp_sampling_ms = 500;      // Intervalo de muestreo por defecto (ms)
+static int simtemp_threshold = 30000;      // Default threshold: 30°C
+static int simtemp_sampling_ms = 500;      // Default sampling interval (ms)
 
 static struct timer_list simtemp_timer;
 static struct workqueue_struct *simtemp_wq;
 static struct work_struct simtemp_work;
 
-// Función para generar una muestra aleatoria
+static struct platform_device *simtemp_pdev;
+
+static DECLARE_WAIT_QUEUE_HEAD(simtemp_wq_read);
+static bool data_ready = false;
+
+// Function to generate a random sample
 static void simtemp_generate_sample(struct work_struct *work)
 {
-    latest_sample.temp_mC = 40000 + (get_random_u32() % 10000); // 40°C a 50°C
-    latest_sample.flags = (latest_sample.temp_mC >= simtemp_threshold) ? 1 : 0;
+    latest_sample.temp_mC = 40000 + (get_random_u32() % 10000); // Range: 40°C to 50°C
+    latest_sample.flags = (latest_sample.temp_mC >= simtemp_threshold*1000) ? 1 : 0;
 
-    // Reprogramar timer
+    data_ready = true;
+    wake_up_interruptible(&simtemp_wq_read);
+
     mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(simtemp_sampling_ms));
 }
 
@@ -45,23 +56,21 @@ static void simtemp_timer_cb(struct timer_list *t)
     queue_work(simtemp_wq, &simtemp_work);
 }
 
-// Función read
+// Read function
 static ssize_t simtemp_read(struct file *file, char __user *buf,
                              size_t count, loff_t *ppos)
 {
     char tmp[128];
     int len;
 
-    // latest_sample.temp_mC está en miligrados (int)
-    int temp_int = latest_sample.temp_mC / 1000;       // parte entera
-    int temp_frac = latest_sample.temp_mC % 1000;      // parte decimal
+    int temp_int = latest_sample.temp_mC / 1000;
+    int temp_frac = latest_sample.temp_mC % 1000;
 
     len = snprintf(tmp, sizeof(tmp), "Temp: %d.%03d °C | flags=0x%x\n",
-                   temp_int, temp_frac,
-                   latest_sample.flags);
+                   temp_int, temp_frac, latest_sample.flags);
 
     if (*ppos >= len) {
-        *ppos = 0; // reset offset
+        *ppos = 0;
     }
 
     if (count > len) count = len;
@@ -70,9 +79,12 @@ static ssize_t simtemp_read(struct file *file, char __user *buf,
         return -EFAULT;
 
     *ppos += count;
+    data_ready = false; // reset flag
+
     return count;
 }
-// Función ioctl
+
+// IOCTL function
 static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     int value;
@@ -82,14 +94,14 @@ static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg
             if (copy_from_user(&value, (int __user *)arg, sizeof(int)))
                 return -EFAULT;
             simtemp_threshold = value;
-            pr_info("Threshold seteado a %d\n", simtemp_threshold);
+            pr_info("Threshold set to %d\n", simtemp_threshold);
             break;
 
         case NXPSIM_IOCTL_SET_SAMPLING_MS:
             if (copy_from_user(&value, (int __user *)arg, sizeof(int)))
                 return -EFAULT;
             simtemp_sampling_ms = value;
-            pr_info("Sampling seteado a %d ms\n", simtemp_sampling_ms);
+            pr_info("Sampling interval set to %d ms\n", simtemp_sampling_ms);
             break;
 
         default:
@@ -98,11 +110,19 @@ static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg
     return 0;
 }
 
+// Poll function
+static unsigned int simtemp_poll(struct file *file, poll_table *wait)
+{
+    poll_wait(file, &simtemp_wq_read, wait);
+    return data_ready ? POLLIN | POLLRDNORM : 0;
+}
+
 // File operations
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
     .read = simtemp_read,
     .unlocked_ioctl = simtemp_ioctl,
+    .poll = simtemp_poll,
     .llseek = noop_llseek,
 };
 
@@ -113,37 +133,76 @@ static struct miscdevice simtemp_dev = {
     .fops  = &simtemp_fops,
 };
 
-// Init del módulo
-static int __init simtemp_init(void)
+static const struct of_device_id simtemp_of_match[] = {
+    { .compatible = "nxp,simtemp", },
+    { /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, simtemp_of_match);
+
+// Probe function
+static int simtemp_probe(struct platform_device *pdev)
 {
-    int ret;
+    struct device_node *np = pdev->dev.of_node;
+
+    if (np) {
+        pr_info("Device tree node found\n");
+        of_property_read_u32(np, "threshold-mC", &simtemp_threshold);
+        pr_info("Threshold from DT: %d\n", simtemp_threshold);
+        of_property_read_u32(np, "sampling-ms", &simtemp_sampling_ms);
+        pr_info("Sampling interval from DT: %d ms\n", simtemp_sampling_ms);
+    }
 
     simtemp_wq = create_singlethread_workqueue("simtemp_wq");
-    if (!simtemp_wq)
-        return -ENOMEM;
-
     INIT_WORK(&simtemp_work, simtemp_generate_sample);
     timer_setup(&simtemp_timer, simtemp_timer_cb, 0);
     mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(simtemp_sampling_ms));
 
-    ret = misc_register(&simtemp_dev);
-    if (ret) {
-        destroy_workqueue(simtemp_wq);
-        return ret;
-    }
-
-    pr_info("nxp_simtemp driver loaded\n");
-    return 0;
+    return misc_register(&simtemp_dev);
 }
 
-// Exit del módulo
-static void __exit simtemp_exit(void)
+// Remove function
+static void simtemp_remove(struct platform_device *pdev)
 {
     del_timer_sync(&simtemp_timer);
     cancel_work_sync(&simtemp_work);
     destroy_workqueue(simtemp_wq);
     misc_deregister(&simtemp_dev);
-    pr_info("nxp_simtemp driver unloaded\n");
+}
+
+static struct platform_driver simtemp_driver = {
+    .driver = {
+        .name = "nxp_simtemp",
+        .of_match_table = simtemp_of_match,
+    },
+    .probe = simtemp_probe,
+    .remove = simtemp_remove,
+};
+
+// Module init
+static int __init simtemp_init(void)
+{
+    int ret;
+
+    // Register the device manually
+    simtemp_pdev = platform_device_register_simple("nxp_simtemp", -1, NULL, 0);
+    if (IS_ERR(simtemp_pdev))
+        return PTR_ERR(simtemp_pdev);
+
+    // Register the driver
+    ret = platform_driver_register(&simtemp_driver);
+    if (ret) {
+        platform_device_unregister(simtemp_pdev);
+        return ret;
+    }
+
+    return 0;
+}
+
+// Module exit
+static void __exit simtemp_exit(void)
+{
+    platform_driver_unregister(&simtemp_driver);
+    platform_device_unregister(simtemp_pdev);
 }
 
 module_init(simtemp_init);

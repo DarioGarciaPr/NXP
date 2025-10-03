@@ -1,32 +1,47 @@
 #!/bin/bash
-# run_demo.sh
-# Script para cargar módulo y ejecutar demo CLI
+set -e
 
-set -e  # salir si hay algún error
+# Determinar la ruta base del proyecto (donde está simtemp/)
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+KERNEL_DIR="$BASE_DIR/kernel"
+CLI_DIR="$BASE_DIR/user/cli"
 
-# Obtener directorio del script
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "Base directory: $BASE_DIR"
+echo "Kernel directory: $KERNEL_DIR"
+echo "CLI directory: $CLI_DIR"
 
-# Paths
-KERNEL_MODULE="$SCRIPT_DIR/../kernel/nxp_simtemp.ko"
-CLI_BIN="$SCRIPT_DIR/../user/cli/main"
-
-echo "=== Desmontando módulo previo (si existe) ==="
-sudo rmmod nxp_simtemp 2>/dev/null || true
-
-echo "=== Insertando módulo ==="
-sudo insmod "$KERNEL_MODULE"
-
-echo "=== Verificando que el módulo esté cargado ==="
-lsmod | grep nxp_simtemp || echo "Módulo no cargado"
-
-echo "=== Ejecutando demo CLI (C++) ==="
-if [ ! -f "$CLI_BIN" ]; then
-    echo "El binario CLI no existe. Compilando main.cpp..."
-    g++ -o "$CLI_BIN" "$(dirname "$CLI_BIN")/main.cpp"
+# Desmontar módulo si ya existe
+if lsmod | grep -q nxp_simtemp; then
+    echo "=== Desmontando módulo previo ==="
+    sudo rmmod nxp_simtemp || true
 fi
 
-"$CLI_BIN"
+# Compilar módulo kernel
+echo "=== Compilando módulo kernel ==="
+make -C /lib/modules/$(uname -r)/build M="$KERNEL_DIR" modules
 
-echo "=== Demo completada ==="
+# Insertar módulo
+echo "=== Insertando módulo ==="
+sudo insmod "$KERNEL_DIR/nxp_simtemp.ko"
+
+# Verificar que el módulo esté cargado
+echo "=== Verificando módulo cargado ==="
+lsmod | grep nxp_simtemp || true
+dmesg | tail -n 10
+
+# Compilar CLI
+echo "=== Compilando CLI ==="
+mkdir -p "$CLI_DIR/build"
+g++ -I"$BASE_DIR/kernel" "$CLI_DIR/main.cpp" -o "$CLI_DIR/build/main"
+
+# Ejecutar demo
+echo "=== Ejecutando demo ==="
+"$CLI_DIR/build/main" 
+
+echo "=== Ejecutando demo --test==="
+"$CLI_DIR/build/main" --test
+
+# Desmontar módulo al final
+echo "=== Desmontando módulo ==="
+sudo rmmod nxp_simtemp || true
 

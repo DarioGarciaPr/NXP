@@ -1,0 +1,7 @@
+
+nxp_simtemp: nxp_simtemp@0 {
+    compatible = "nxp,simtemp";
+    threshold-mC = <40000>;
+    sampling-ms = <1000>;
+};
+
